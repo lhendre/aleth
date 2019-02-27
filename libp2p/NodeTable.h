@@ -117,7 +117,8 @@ public:
     void stop()
     {
         m_socket->disconnect();
-        m_timers.stop();
+        m_discoveryTimer.cancel();
+        m_evictionTimer.cancel();
     }
 
     /// Set event handler for NodeEntryAdded and NodeEntryDropped events.
@@ -306,7 +307,8 @@ protected:
 
     bool m_allowLocalDiscovery;                                     ///< Allow nodes with local addresses to be included in the discovery process
 
-    DeadlineOps m_timers; ///< this should be the last member - it must be destroyed first
+    ba::deadline_timer m_discoveryTimer;
+    ba::deadline_timer m_evictionTimer;
 
     ba::io_service& m_io;
 };

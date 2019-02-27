@@ -40,7 +40,8 @@ NodeTable::NodeTable(ba::io_service& _io, KeyPair const& _alias, NodeIPEndpoint 
         _io, static_cast<UDPSocketEvents&>(*this), (bi::udp::endpoint)m_hostNodeEndpoint)),
     m_requestTimeToLive(DiscoveryDatagram::c_timeToLive),
     m_allowLocalDiscovery(_allowLocalDiscovery),
-    m_timers(_io),
+    m_discoveryTimer(_io),
+    m_evictionTimer(_io),
     m_io(_io)
 {
     for (unsigned i = 0; i < s_bins; i++)
@@ -233,22 +234,17 @@ void NodeTable::doDiscover(NodeID _node, unsigned _round, shared_ptr<set<shared_
         return;
     }
 
-    m_timers.schedule(c_reqTimeout.count() * 2, [this, _node, _round, _tried](boost::system::error_code const& _ec)
-    {
+    m_discoveryTimer.expires_from_now(boost::posix_time::milliseconds(c_reqTimeout.count() * 2));
+    m_discoveryTimer.async_wait([this, _node, _round, _tried](
+                                    boost::system::error_code const& _ec) {
         if (_ec)
+        {
             // we can't use m_logger here, because captured this might be already destroyed
             clog(VerbosityDebug, "discov")
                 << "Discovery timer was probably cancelled: " << _ec.value() << " "
                 << _ec.message();
-
-        if (_ec.value() == boost::asio::error::operation_aborted || m_timers.isStopped())
             return;
-
-        // error::operation_aborted means that the timer was probably aborted.
-        // It usually happens when "this" object is deallocated, in which case
-        // subsequent call to doDiscover() would cause a crash. We can not rely on
-        // m_timers.isStopped(), because "this" pointer was captured by the lambda,
-        // and therefore, in case of deallocation m_timers object no longer exists.
+        }
 
         doDiscover(_node, _round + 1, _tried);
     });
@@ -621,16 +617,16 @@ void NodeTable::onPacketReceived(
 
 void NodeTable::doDiscovery()
 {
-    m_timers.schedule(c_bucketRefresh.count(), [this](boost::system::error_code const& _ec)
-    {
+    m_discoveryTimer.expires_from_now(boost::posix_time::milliseconds(c_bucketRefresh.count()));
+    m_discoveryTimer.async_wait([this](boost::system::error_code const& _ec) {
         if (_ec)
+        {
             // we can't use m_logger here, because captured this might be already destroyed
             clog(VerbosityDebug, "discov")
                 << "Discovery timer was probably cancelled: " << _ec.value() << " "
                 << _ec.message();
-
-        if (_ec.value() == boost::asio::error::operation_aborted || m_timers.isStopped())
             return;
+        }
 
         NodeID randNodeId;
         crypto::Nonce::get().ref().copyTo(randNodeId.ref().cropped(0, h256::size));
@@ -642,8 +638,9 @@ void NodeTable::doDiscovery()
 
 void NodeTable::doHandleTimeouts()
 {
-    m_timers.schedule(c_handleTimeoutsIntervalMs, [this](boost::system::error_code const& _ec) {
-        if ((_ec && _ec.value() == boost::asio::error::operation_aborted) || m_timers.isStopped())
+    m_evictionTimer.expires_from_now(boost::posix_time::milliseconds(c_handleTimeoutsIntervalMs));
+    m_evictionTimer.async_wait([this](boost::system::error_code const& _ec) {
+        if (_ec)
             return;
 
         vector<shared_ptr<NodeEntry>> nodesToActivate;
