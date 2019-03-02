@@ -33,32 +33,56 @@ inline bool operator==(
 
 NodeTable::NodeTable(ba::io_service& _io, KeyPair const& _alias, NodeIPEndpoint const& _endpoint,
     bool _enabled, bool _allowLocalDiscovery)
-  : m_hostNodeID(_alias.pub()),
-    m_hostNodeEndpoint(_endpoint),
-    m_secret(_alias.secret()),
-    m_socket(make_shared<NodeSocket>(
-        _io, static_cast<UDPSocketEvents&>(*this), (bi::udp::endpoint)m_hostNodeEndpoint)),
-    m_requestTimeToLive(DiscoveryDatagram::c_timeToLive),
-    m_allowLocalDiscovery(_allowLocalDiscovery),
-    m_discoveryTimer(_io),
-    m_evictionTimer(_io),
-    m_io(_io)
+  : m_hostNodeID{_alias.pub()},
+    m_hostNodeEndpoint{_endpoint},
+    m_secret{_alias.secret()},
+    m_socket{make_shared<NodeSocket>(
+        _io, static_cast<UDPSocketEvents&>(*this), (bi::udp::endpoint)m_hostNodeEndpoint)},
+    m_requestTimeToLive{DiscoveryDatagram::c_timeToLive},
+    m_allowLocalDiscovery{_allowLocalDiscovery},
+    m_discoveryTimer{std::make_shared<ba::deadline_timer>(_io)},
+    m_evictionTimer{std::make_shared<ba::deadline_timer>(_io)},
+    m_io{_io}
 {
     for (unsigned i = 0; i < s_bins; i++)
         m_buckets[i].distance = i;
 
-    if (!_enabled)
+    if (_enabled)
+    {
+        try
+        {
+            m_socket->connect();
+        }
+        catch (std::exception const& _e)
+        {
+            cwarn << "Exception connecting NodeTable socket: " << _e.what();
+            _enabled = false;
+        }
+    }
+    else cwarn << "\"enabled\" parameter is false";
+
+    if (!_enabled) cwarn << "Discovery disabled.";
+}
+
+void NodeTable::start()
+{
+    if (!m_socket->isOpen())
+    {
+        cwarn << "NodeTable socket isn't open. Discovery is disabled";
         return;
+    }
 
     try
     {
-        m_socket->connect();
         doDiscovery();
-        doHandleTimeouts();
+        m_evictionTimer->expires_from_now(
+            boost::posix_time::milliseconds(c_handleTimeoutsIntervalMs));
+        m_evictionTimer->async_wait(std::bind(&NodeTable::doHandleTimeouts, shared_from_this(),
+            std::placeholders::_1, m_evictionTimer));
     }
     catch (std::exception const& _e)
     {
-        cwarn << "Exception connecting NodeTable socket: " << _e.what();
+        cwarn << "Exception starting the discovery process: " << _e.what();
         cwarn << "Discovery disabled.";
     }
 }
@@ -191,9 +215,24 @@ shared_ptr<NodeEntry> NodeTable::nodeEntry(NodeID const& _id)
     return it != m_allNodes.end() ? it->second : shared_ptr<NodeEntry>();
 }
 
-void NodeTable::doDiscover(NodeID _node, unsigned _round, shared_ptr<set<shared_ptr<NodeEntry>>> _tried)
+void NodeTable::doDiscover(boost::system::error_code _ec, NodeID _node, unsigned _round,
+    shared_ptr<set<shared_ptr<NodeEntry>>> _tried, shared_ptr<ba::deadline_timer> _timer)
 {
     // NOTE: ONLY called by doDiscovery!
+
+    // We can't use m_logger yet since the node table might have already been destroyed
+    if (_ec == boost::asio::error::operation_aborted ||
+        _timer->expires_at() == boost::posix_time::min_date_time)
+    {
+        clog(VerbosityDebug, "discov") << "Discovery timer was probably cancelled";
+        return;
+    }
+    else if (_ec)
+    {
+        clog(VerbosityDebug, "discov")
+            << "Discovery timer error detected: " << _ec.value() << " " << _ec.message();
+        return;
+    }
 
     if (!m_socket->isOpen())
         return;
@@ -234,20 +273,9 @@ void NodeTable::doDiscover(NodeID _node, unsigned _round, shared_ptr<set<shared_
         return;
     }
 
-    m_discoveryTimer.expires_from_now(boost::posix_time::milliseconds(c_reqTimeout.count() * 2));
-    m_discoveryTimer.async_wait([this, _node, _round, _tried](
-                                    boost::system::error_code const& _ec) {
-        if (_ec)
-        {
-            // we can't use m_logger here, because captured this might be already destroyed
-            clog(VerbosityDebug, "discov")
-                << "Discovery timer was probably cancelled: " << _ec.value() << " "
-                << _ec.message();
-            return;
-        }
-
-        doDiscover(_node, _round + 1, _tried);
-    });
+    _timer->expires_from_now(boost::posix_time::milliseconds(c_reqTimeout.count() * 2));
+    _timer->async_wait(std::bind(&NodeTable::doDiscover, shared_from_this(), std::placeholders::_1,
+        _node, _round + 1, _tried, _timer));
 }
 
 vector<shared_ptr<NodeEntry>> NodeTable::nearestNodeEntries(NodeID _target)
@@ -326,7 +354,8 @@ void NodeTable::ping(Node const& _node, shared_ptr<NodeEntry> _replacementNodeEn
 
 void NodeTable::schedulePing(Node const& _node)
 {
-    m_io.post([this, _node] { ping(_node, {}); });
+    auto self = shared_from_this();
+    m_io.post([this, self, _node] { ping(_node, {}); });
 }
 
 void NodeTable::evict(NodeEntry const& _leastSeen, shared_ptr<NodeEntry> _replacement)
@@ -617,59 +646,61 @@ void NodeTable::onPacketReceived(
 
 void NodeTable::doDiscovery()
 {
-    m_discoveryTimer.expires_from_now(boost::posix_time::milliseconds(c_bucketRefresh.count()));
-    m_discoveryTimer.async_wait([this](boost::system::error_code const& _ec) {
-        if (_ec)
-        {
-            // we can't use m_logger here, because captured this might be already destroyed
-            clog(VerbosityDebug, "discov")
-                << "Discovery timer was probably cancelled: " << _ec.value() << " "
-                << _ec.message();
-            return;
-        }
+    NodeID randNodeId;
+    crypto::Nonce::get().ref().copyTo(randNodeId.ref().cropped(0, h256::size));
+    crypto::Nonce::get().ref().copyTo(randNodeId.ref().cropped(h256::size, h256::size));
+    LOG(m_logger) << "Queueing discovery algorithm run for random node id: " << randNodeId;
 
-        NodeID randNodeId;
-        crypto::Nonce::get().ref().copyTo(randNodeId.ref().cropped(0, h256::size));
-        crypto::Nonce::get().ref().copyTo(randNodeId.ref().cropped(h256::size, h256::size));
-        LOG(m_logger) << "Random discovery: " << randNodeId;
-        doDiscover(randNodeId, 0, make_shared<set<shared_ptr<NodeEntry>>>());
-    });
+    m_discoveryTimer->expires_from_now(boost::posix_time::milliseconds(c_bucketRefresh.count()));
+    m_discoveryTimer->async_wait(
+        std::bind(&NodeTable::doDiscover, shared_from_this(), std::placeholders::_1, randNodeId,
+            0 /* round */, make_shared<set<shared_ptr<NodeEntry>>>(), m_discoveryTimer));
 }
 
-void NodeTable::doHandleTimeouts()
+void NodeTable::doHandleTimeouts(
+    boost::system::error_code const& _ec, std::shared_ptr<ba::deadline_timer> _timer)
 {
-    m_evictionTimer.expires_from_now(boost::posix_time::milliseconds(c_handleTimeoutsIntervalMs));
-    m_evictionTimer.async_wait([this](boost::system::error_code const& _ec) {
-        if (_ec)
-            return;
+    // We can't use m_logger yet because the NodeTable might have already been destroyed
+    if (_ec == boost::asio::error::operation_aborted ||
+        _timer->expires_at() == boost::posix_time::min_date_time)
+    {
+        clog(VerbosityDebug, "discov") << "handleTimeouts timer was probably cancelled";
+        return;
+    }
+    else if (_ec)
+    {
+        clog(VerbosityDebug, "discov")
+            << "handleTimeouts timer encountered an error: " << _ec.value() << " " << _ec.message();
+        return;
+    }
 
-        vector<shared_ptr<NodeEntry>> nodesToActivate;
-        for (auto it = m_sentPings.begin(); it != m_sentPings.end();)
+    vector<shared_ptr<NodeEntry>> nodesToActivate;
+    for (auto it = m_sentPings.begin(); it != m_sentPings.end();)
+    {
+        if (chrono::steady_clock::now() > it->second.pingSendTime + m_requestTimeToLive)
         {
-            if (chrono::steady_clock::now() >
-                it->second.pingSendTime + m_requestTimeToLive)
+            if (auto node = nodeEntry(it->first))
             {
-                if (auto node = nodeEntry(it->first))
-                {
-                    dropNode(move(node));
+                dropNode(move(node));
 
-                    // save the replacement node that should be activated
-                    if (it->second.replacementNodeEntry)
-                        nodesToActivate.emplace_back(move(it->second.replacementNodeEntry));
-                }
-
-                it = m_sentPings.erase(it);
+                // save the replacement node that should be activated
+                if (it->second.replacementNodeEntry)
+                    nodesToActivate.emplace_back(move(it->second.replacementNodeEntry));
             }
-            else
-                ++it;
+
+            it = m_sentPings.erase(it);
         }
+        else
+            ++it;
+    }
 
-        // activate replacement nodes and put them into buckets
-        for (auto const& n : nodesToActivate)
-            noteActiveNode(n, n->endpoint);
+    // activate replacement nodes and put them into buckets
+    for (auto const& n : nodesToActivate)
+        noteActiveNode(n, n->endpoint);
 
-        doHandleTimeouts();
-    });
+    _timer->expires_from_now(boost::posix_time::milliseconds(c_handleTimeoutsIntervalMs));
+    _timer->async_wait(
+        std::bind(&NodeTable::doHandleTimeouts, shared_from_this(), std::placeholders::_1, _timer));
 }
 
 unique_ptr<DiscoveryDatagram> DiscoveryDatagram::interpretUDP(bi::udp::endpoint const& _from, bytesConstRef _packet)
