@@ -46,21 +46,22 @@ NodeTable::NodeTable(ba::io_service& _io, KeyPair const& _alias, NodeIPEndpoint 
     for (unsigned i = 0; i < s_bins; i++)
         m_buckets[i].distance = i;
 
-    if (_enabled)
+    if (!_enabled)
     {
-        try
-        {
-            m_socket->connect();
-        }
-        catch (exception const& _e)
-        {
-            cwarn << "Exception connecting NodeTable socket: " << _e.what();
-            _enabled = false;
-        }
+        cwarn << "\"_enabled\" parameter is false, discovery is disabled";
+        return;
     }
-    else cwarn << "\"enabled\" parameter is false";
 
-    if (!_enabled) cwarn << "Discovery disabled.";
+    try
+    {
+        m_socket->connect();
+    }
+    catch (exception const& _e)
+    {
+        cwarn << "Exception connecting NodeTable socket: " << _e.what();
+        cwarn << "Discovery disabled.";
+        return;
+    }
 }
 
 void NodeTable::start()
