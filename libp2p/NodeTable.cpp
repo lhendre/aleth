@@ -17,12 +17,12 @@ BOOST_LOG_INLINE_GLOBAL_LOGGER_CTOR_ARGS(g_discoveryWarnLogger,
     (boost::log::keywords::severity = 0)(boost::log::keywords::channel = "discov"))
 
 constexpr unsigned c_handleTimeoutsIntervalMs = 5000;
-
 }  // namespace
 
 constexpr chrono::seconds DiscoveryDatagram::c_timeToLive;
 constexpr chrono::milliseconds NodeTable::c_reqTimeout;
 constexpr chrono::milliseconds NodeTable::c_bucketRefresh;
+constexpr std::chrono::milliseconds NodeTable::c_discoveryRoundIntervalMs;
 constexpr chrono::milliseconds NodeTable::c_evictionCheckInterval;
 
 inline bool operator==(weak_ptr<NodeEntry> const& _weak, shared_ptr<NodeEntry> const& _shared)
@@ -215,7 +215,7 @@ shared_ptr<NodeEntry> NodeTable::nodeEntry(NodeID const& _id)
     return it != m_allNodes.end() ? it->second : shared_ptr<NodeEntry>();
 }
 
-void NodeTable::doDiscover(boost::system::error_code _ec, NodeID _node, unsigned _round,
+void NodeTable::doDiscoveryRound(boost::system::error_code _ec, NodeID _node, unsigned _round,
     shared_ptr<set<shared_ptr<NodeEntry>>> _tried, shared_ptr<ba::deadline_timer> _timer)
 {
     // NOTE: ONLY called by doDiscovery!
@@ -273,9 +273,9 @@ void NodeTable::doDiscover(boost::system::error_code _ec, NodeID _node, unsigned
         return;
     }
 
-    _timer->expires_from_now(boost::posix_time::milliseconds(c_reqTimeout.count() * 2));
-    _timer->async_wait(bind(&NodeTable::doDiscover, shared_from_this(), placeholders::_1, _node,
-        _round + 1, _tried, _timer));
+    _timer->expires_from_now(boost::posix_time::milliseconds(c_discoveryRoundIntervalMs.count()));
+    _timer->async_wait(bind(&NodeTable::doDiscoveryRound, shared_from_this(), placeholders::_1,
+        _node, _round + 1, _tried, _timer));
 }
 
 vector<shared_ptr<NodeEntry>> NodeTable::nearestNodeEntries(NodeID _target)
@@ -652,8 +652,9 @@ void NodeTable::doDiscovery()
     LOG(m_logger) << "Queueing discovery algorithm run for random node id: " << randNodeId;
 
     m_discoveryTimer->expires_from_now(boost::posix_time::milliseconds(c_bucketRefresh.count()));
-    m_discoveryTimer->async_wait(bind(&NodeTable::doDiscover, shared_from_this(), placeholders::_1,
-        randNodeId, 0 /* round */, make_shared<set<shared_ptr<NodeEntry>>>(), m_discoveryTimer));
+    m_discoveryTimer->async_wait(
+        bind(&NodeTable::doDiscoveryRound, shared_from_this(), placeholders::_1, randNodeId,
+            0 /* round */, make_shared<set<shared_ptr<NodeEntry>>>(), m_discoveryTimer));
 }
 
 void NodeTable::doHandleTimeouts(
