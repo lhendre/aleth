@@ -234,9 +234,8 @@ protected:
 
     /// Used to discovery nodes on network which are close to the given target.
     /// Sends s_alpha concurrent requests to nodes nearest to target, for nodes nearest to target, up to s_maxSteps rounds.
-    void doDiscoveryRound(boost::system::error_code _ec, NodeID _target, unsigned _round,
-        std::shared_ptr<std::set<std::shared_ptr<NodeEntry>>> _tried,
-        std::shared_ptr<ba::deadline_timer> _timer);
+    void doDiscoveryRound(NodeID _target, unsigned _round,
+        std::shared_ptr<std::set<std::shared_ptr<NodeEntry>>> _tried);
 
     /// Returns nodes from node table which are closest to target.
     std::vector<std::shared_ptr<NodeEntry>> nearestNodeEntries(NodeID _target);
@@ -268,14 +267,11 @@ protected:
 
     /// Tasks
 
-    /// Called by evict() to ensure eviction check is scheduled to run and terminates when no evictions remain. Asynchronous.
-    void doCheckEvictions();
-
     /// Looks up a random node at @c_bucketRefresh interval.
     void doDiscovery();
 
-    void doHandleTimeouts(
-        boost::system::error_code const& _ec, std::shared_ptr<ba::deadline_timer> _timer);
+    /// Drop nodes from the node table who haven't responded to ping and bring in their replacements
+    void doProcessEvictions();
 
     // Useful only for tests.
     void setRequestTimeToLive(std::chrono::seconds const& _time) { m_requestTimeToLive = _time; }
