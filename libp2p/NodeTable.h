@@ -129,9 +129,9 @@ public:
             // timers
             auto self = shared_from_this();
             m_io.post(
-                [this, self] { m_discoveryTimer->expires_at(boost::posix_time::min_date_time); });
+                [this, self] { m_discoveryTimer.expires_at(boost::posix_time::min_date_time); });
             m_io.post(
-                [this, self] { m_evictionTimer->expires_at(boost::posix_time::min_date_time); });
+                [this, self] { m_evictionTimer.expires_at(boost::posix_time::min_date_time); });
             m_socket->disconnect();
         }
     }
@@ -323,13 +323,8 @@ protected:
 
     bool m_allowLocalDiscovery;                                     ///< Allow nodes with local addresses to be included in the discovery process
 
-    // timers are shared_ptr so we can keep them alive if handlers are executed after the node table
-    // has been destroyed so we can check for timer cancellation. Note that this is technically not
-    // necessary since the node table's lifetime is tied to the host's lifetime and once the host is
-    // destructed there's no more ioservice work loop, but it's good practice to use this design in
-    // case the node table lifetime changes in the future
-    std::shared_ptr<ba::deadline_timer> m_discoveryTimer;
-    std::shared_ptr<ba::deadline_timer> m_evictionTimer;
+    ba::deadline_timer m_discoveryTimer;
+    ba::deadline_timer m_evictionTimer;
 
     ba::io_service& m_io;
 };
