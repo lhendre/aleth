@@ -16,7 +16,7 @@ BOOST_LOG_INLINE_GLOBAL_LOGGER_CTOR_ARGS(g_discoveryWarnLogger,
     boost::log::sources::severity_channel_logger_mt<>,
     (boost::log::keywords::severity = 0)(boost::log::keywords::channel = "discov"))
 
-constexpr unsigned c_handleTimeoutsIntervalMs = 5000;
+constexpr unsigned c_processEvictionsIntervalMs = 5000;
 }  // namespace
 
 constexpr chrono::seconds DiscoveryDatagram::c_timeToLive;
@@ -671,18 +671,18 @@ void NodeTable::doDiscovery()
 
 void NodeTable::doProcessEvictions()
 {
-    m_evictionTimer.expires_from_now(boost::posix_time::milliseconds(c_handleTimeoutsIntervalMs));
+    m_evictionTimer.expires_from_now(boost::posix_time::milliseconds(c_processEvictionsIntervalMs));
     auto self = shared_from_this();
     m_evictionTimer.async_wait([this, self](boost::system::error_code const& _ec) {
         if (_ec == boost::asio::error::operation_aborted ||
             m_evictionTimer.expires_at() == boost::posix_time::min_date_time)
         {
-            LOG(m_logger) << "handleTimeouts timer was probably cancelled";
+            LOG(m_logger) << "evictions timer was probably cancelled";
             return;
         }
         else if (_ec)
         {
-            LOG(m_logger) << "handleTimeouts timer encountered an error: " << _ec.value() << " "
+            LOG(m_logger) << "evictions timer encountered an error: " << _ec.value() << " "
                           << _ec.message();
             return;
         }
