@@ -312,7 +312,7 @@ vector<shared_ptr<NodeEntry>> NodeTable::nearestNodeEntries(NodeID _target)
 void NodeTable::ping(Node const& _node, shared_ptr<NodeEntry> _replacementNodeEntry)
 {
     // Don't sent Ping if one is already sent
-    if (contains(m_sentPings, _node.id))
+    if (m_sentPings.find(_node.endpoint) != m_sentPings.end())
     {
         LOG(m_logger) << "Ignoring request to ping " << _node << ", because it's already pinged";
         return;
@@ -324,8 +324,9 @@ void NodeTable::ping(Node const& _node, shared_ptr<NodeEntry> _replacementNodeEn
     LOG(m_logger) << p.typeName() << " to " << _node;
     m_socket->send(p);
 
-    m_sentPings[_node.id] = {
-        _node.endpoint, chrono::steady_clock::now(), pingHash, move(_replacementNodeEntry)};
+    NodeValidation const validation(_node.id, _node.endpoint.tcpPort(), chrono::steady_clock::now(),
+        pingHash, _replacementNodeEntry);
+    m_sentPings.insert({_node.endpoint, validation});
 }
 
 void NodeTable::schedulePing(Node const& _node)
@@ -460,11 +461,8 @@ void NodeTable::onPacketReceived(
         {
             case Pong::type:
             {
-                auto const& pong = dynamic_cast<Pong const&>(*packet);
-                auto const& sourceId = pong.sourceid;
-
                 // validate pong
-                auto const sentPing = m_sentPings.find(sourceId);
+                auto const sentPing = m_sentPings.find(_from);
                 if (sentPing == m_sentPings.end())
                 {
                     LOG(m_logger) << "Unexpected PONG from " << _from.address().to_string() << ":"
@@ -472,6 +470,7 @@ void NodeTable::onPacketReceived(
                     return;
                 }
 
+                auto const& pong = dynamic_cast<Pong const&>(*packet);
                 if (pong.echo != sentPing->second.pingHash)
                 {
                     LOG(m_logger) << "Invalid PONG from " << _from.address().to_string() << ":"
@@ -482,10 +481,12 @@ void NodeTable::onPacketReceived(
                 // create or update nodeEntry with new Pong received time
                 DEV_GUARDED(x_nodes)
                 {
+                    auto const& sourceId = pong.sourceid;
                     auto it = m_allNodes.find(sourceId);
                     if (it == m_allNodes.end())
                         sourceNodeEntry = make_shared<NodeEntry>(m_hostNodeID, sourceId,
-                            sentPing->second.endpoint, RLPXDatagramFace::secondsSinceEpoch(), 0);
+                            NodeIPEndpoint{_from.address(), _from.port(), sentPing->second.tcpPort},
+                            RLPXDatagramFace::secondsSinceEpoch(), 0);
                     else
                     {
                         sourceNodeEntry = it->second;
@@ -494,7 +495,7 @@ void NodeTable::onPacketReceived(
                     }
                 }
 
-                m_sentPings.erase(sentPing);
+                m_sentPings.erase(_from);
 
                 // update our endpoint address and UDP port
                 DEV_GUARDED(x_nodes)
@@ -652,7 +653,7 @@ void NodeTable::doHandleTimeouts()
             if (chrono::steady_clock::now() >
                 it->second.pingSendTime + m_requestTimeToLive)
             {
-                if (auto node = nodeEntry(it->first))
+                if (auto node = nodeEntry(it->second.nodeID))
                 {
                     dropNode(move(node));
 
